@@ -1,0 +1,17 @@
+class Kick < Formula
+  desc "TODO"
+  homepage "http://changeme.go"
+  url "${BASEURL}/${NAME}-${VERSION}.tar.gz"
+  version "${VERSION}"
+  sha256 "${SHA256}"
+  license "APACHE-2.0"
+
+  depends_on "go@1.16" => :build
+  depends_on "sqlite" => :build
+
+  def install
+    ENV["CGO_ENABLED"] = "1"
+    system "go", "install", "./cmd/${NAME}"
+    bin.install ENV["GOPATH"] + "/bin/${NAME}"
+  end
+end

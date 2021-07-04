@@ -2,9 +2,10 @@
 package main
 
 import (
-    "fmt"
-    "${GOSERVER}/${GOGROUP}/${PROJECT_NAME}/internal/options"
     "os"
+
+    "${GOSERVER}/${GOGROUP}/${PROJECT_NAME}/internal"
+    "${GOSERVER}/${GOGROUP}/${PROJECT_NAME}/internal/options"
 )
 
 func main() {

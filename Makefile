@@ -1,17 +1,14 @@
-# kick:render
 SHELL = /bin/bash
 
 MAKEFLAGS += --no-print-directory
 
 # Project
-NAME := ${PROJECT_NAME}
+NAME := $(shell cat NAME)
 GOPATH := $(shell go env GOPATH)
 VERSION ?= $(shell cat VERSION)
-COMMIT := $(shell test -d .git && git rev-parse --short HEAD)
-BUILD_INFO := $(COMMIT)-$(shell date -u +"%Y%m%d-%H%M%SZ")
 HASCMD := $(shell test -d cmd && echo "true")
-GOOS ?= $(shell uname | tr '[:upper:]' '[:lower:]')
-GOARCH ?= $(shell uname -m | sed 's/x86_64/amd64/; s/i386/386/')
+GOOS ?= $(shell go env GOOS)
+GOARCH ?= $(shell go env GOARCH)
 ARCH = $(shell uname -m)
 
 ISRELEASED := $(shell git show-ref v$$(cat VERSION) 2>&1 > /dev/null && echo "true")
@@ -20,9 +17,6 @@ ISRELEASED := $(shell git show-ref v$$(cat VERSION) 2>&1 > /dev/null && echo "tr
 # Default environment variables.
 # Any variables already set will override the values in this file(s).
 DOTENV := godotenv -f $(HOME)/.env,.env
-
-# Python
-PYTHON ?= $(shell command -v python3 python|head -n1)
 
 # Variables
 ROOT = $(shell pwd)
@@ -34,64 +28,26 @@ GOFILES := $(shell find cmd pkg internal src -name '*.go' 2> /dev/null)
 GODIRS = $(shell find . -maxdepth 1 -mindepth 1 -type d | egrep 'cmd|internal|pkg|api')
 
 #
-# Help Script
-#
-define PRINT_HELP_PYSCRIPT
-import re, sys
-
-SEC = 1
-CMD = 2
-
-print("Usage: make <target>\n")
-menu = []
-for line in sys.stdin:
-	matchsection = re.match(r'^### ([^#]+)\n$$$$', line)
-	if matchsection:
-		atoms = matchsection.groups()
-		menu.append([SEC, atoms[0], None])
-		continue
-
-	matchcmds = re.match(r'^_?([a-zA-Z_-]+):.*?## (.*)', line)
-	if matchcmds:
-	  target, help = matchcmds.groups()
-	  menu.append([CMD, target, help])
-	  continue
-
-for typ, name, desc in menu:
-	if typ == SEC:
-		print("%s%s%s" % ("\x1b[0001m", name, "\x1b[0000m"))
-	elif typ == CMD:
-		print("  %s%s%s - %s" % ("\x1b[0001m", name, "\x1b[0000m", desc))
-print("")
-endef
-export PRINT_HELP_PYSCRIPT
-
-#
 # End user targets
 #
 
 ### HELP
 
 .PHONY: help
-ifneq (, $${PYTHON})
 help: ## Print Help
-	@$(PYTHON) -c "$$$$PRINT_HELP_PYSCRIPT" < $(MAKEFILE_LIST)
-else
-help:
-	$(error python required for 'make help', executable not found)
-endif
+	@maker --menu=Makefile
 
 ### DEVELOPMENT
 
 .PHONY: _build
 _build: ## Build binary
 	@test -d .cache || go fmt ./...
+ifeq ($(HASCMD),true)
 ifeq ($(XCOMPILE),true)
 	GOOS=linux GOARCH=amd64 $(MAKE) dist/$(NAME)_linux_amd64/$(NAME)
 	GOOS=darwin GOARCH=amd64 $(MAKE) dist/$(NAME)_darwin_amd64/$(NAME)
 	GOOS=windows GOARCH=amd64 $(MAKE) dist/$(NAME)_windows_amd64/$(NAME).exe
 endif
-ifeq ($(HASCMD),true)
 	@$(MAKE) $(NAME)
 endif
 
@@ -101,19 +57,32 @@ _install: $(GOPATH)/bin/$(NAME) ## Install to $(GOPATH)/bin
 .PHONY: clean
 clean: ## Reset project to original state
 	-test -f tmp/server.pid && kill -TERM $$(cat tmp/server.pid)
-	rm -rf .cache kick dist reports tmp vendor nfpm.yaml
+	rm -rf .cache $(NAME) dist reports tmp vendor nfpm.yaml www/site
 
 .PHONY: test
 test: ## Test
 	$(MAKE) test_setup
 	$(MAKE) goversion
 	$(MAKE) lint
-	$(MAKE) unit
-	$(MAKE) cx
-	$(MAKE) cc
+	@echo FEATURE FLAGS ENABLED
+	FF_ENABLED=true $(MAKE) _test_fflags
+	@echo FEATURE FLAGS DISABLED
+	FF_ENABLED=false $(MAKE) _test_std
 	@# Combined the return codes of all the tests
 	@echo "Exit codes, unit tests: $$(cat reports/exitcode-unit.txt), golangci-lint: $$(cat reports/exitcode-golangci-lint.txt), golint: $$(cat reports/exitcode-golint.txt)"
 	@exit $$(( $$(cat reports/exitcode-unit.txt) + $$(cat reports/exitcode-golangci-lint.txt) + $$(cat reports/exitcode-golint.txt) ))
+
+# Test without feature flags
+.PHONY: _test_std
+_test_std:
+	$(MAKE) unit
+	$(MAKE) cx
+	$(MAKE) cc
+
+# Test with feature flags
+.PHONY: _test_fflags
+_test_fflags:
+	$(MAKE) unit
 
 .PHONY: goversion
 goversion:
@@ -122,8 +91,8 @@ goversion:
 .PHONY: _unit
 _unit:
 	### Unit Tests
-	gotestsum --jsonfile reports/unit.json --junitfile reports/junit.xml -- -timeout 5s -covermode atomic -coverprofile=./reports/coverage.out -v ./...; echo $$$$? > reports/exitcode-unit.txt
-	@go-test-report -t "kick unit tests" -o reports/html/unit.html < reports/unit.json > /dev/null
+	gotestsum --jsonfile reports/unit.json --junitfile reports/junit.xml -- -timeout 60s -covermode atomic -coverprofile=./reports/coverage.out -v ./...; echo $$? > reports/exitcode-unit.txt
+	@go-test-report -t "$(NAME) unit tests" -o reports/html/unit.html < reports/unit.json > /dev/null
 
 .PHONY: _cc
 _cc:
@@ -136,16 +105,20 @@ _cc:
 _cx:
 	### Cyclomatix Complexity Report
 	@gocyclo -avg $(GODIRS) | grep -v _test.go | tee reports/cyclomaticcomplexity.txt
-	@contents=$$$$(cat reports/cyclomaticcomplexity.txt); echo "<html><title>cyclomatic complexity</title><body><pre>$$$${contents}</pre></body><html>" > reports/html/cyclomaticcomplexity.html
+	@contents=$$(cat reports/cyclomaticcomplexity.txt); echo "<html><title>cyclomatic complexity</title><body><pre>$${contents}</pre></body><html>" > reports/html/cyclomaticcomplexity.html
 
 .PHONY: _package
 _package: ## Create an RPM, Deb, Homebrew package
 	@XCOMPILE=true make build
 	@VERSION=$(VERSION) envsubst < nfpm.yaml.in > nfpm.yaml
-	$(MAKE) dist/kick.rb
-	$(MAKE) tmp/kick.rb
+	$(MAKE) dist/$(NAME)-$(VERSION).rb
+	$(MAKE) tmp/$(NAME).rb
 	$(MAKE) dist/$(NAME)-$(VERSION).$(ARCH).rpm
 	$(MAKE) dist/$(NAME)_$(VERSION)_$(GOARCH).deb
+
+.PHONY: interfaces
+interfaces: ## Generate interfaces
+	cat ifacemaker.txt | egrep -v '^#' | xargs -n5 bash -c 'ifacemaker -f $$0 -s $$1 -p $$2 -i $$3 -o $$4 -c "DO NOT EDIT: Generated using \"make interfaces\""'
 
 .PHONY: _test_setup
 _test_setup:
@@ -158,47 +131,22 @@ _release: ## Trigger a release by creating a tag and pushing to the upstream rep
 	@$(MAKE) _isreleased 2> /dev/null
 	git tag v$(VERSION)
 	git push --tags
+	$(MAKE) deploydocs
 
 # To be run inside a github workflow
 .PHONY: _release_github
 _release_github: _package
-	github-release release \
-	  --user kick-project \
-	  --repo kick \
-	  --tag v$(VERSION)
-
-	github-release upload \
-	  --name kick-$(VERSION).tar.gz \
-	  --user kick-project \
-	  --repo kick \
-	  --tag v$(VERSION) \
-	  --file dist/kick-$(VERSION).tar.gz
-
-	github-release upload \
-	  --name kick.rb \
-	  --user kick-project \
-	  --repo kick \
-	  --tag v$(VERSION) \
-	  --file dist/kick.rb
-
-	github-release upload \
-	  --name kick-$(VERSION).x86_64.rpm \
-	  --user kick-project \
-	  --repo kick \
-	  --tag v$(VERSION) \
-	  --file dist/kick-$(VERSION).x86_64.rpm
-
-	github-release upload \
-	  --name kick_$(VERSION)_amd64.deb \
-	  --user kick-project \
-	  --repo kick \
-	  --tag v$(VERSION) \
-	  --file dist/kick_$(VERSION)_amd64.deb
+	gh release create v$(VERSION)
+	gh release upload v$(VERSION) dist/$(NAME)-$(VERSION).tar.gz
+	gh release upload v$(VERSION) dist/$(NAME).rb
+	gh release upload v$(VERSION) dist/$(NAME)-$(VERSION).rb
+	gh release upload v$(VERSION) dist/$(NAME)-$(VERSION).x86_64.rpm
+	gh release upload v$(VERSION) dist/$(NAME)_$(VERSION)_amd64.deb
 
 .PHONY: lint
 lint: internal/version.go
-	golangci-lint run --enable=gocyclo; echo $$$$? > reports/exitcode-golangci-lint.txt
-	golint -set_exit_status ./..; echo $$$$? > reports/exitcode-golint.txt
+	golangci-lint run --enable=gocyclo; echo $$? > reports/exitcode-golangci-lint.txt
+	golint -set_exit_status ./..; echo $$? > reports/exitcode-golint.txt
 
 .PHONY: tag
 tag:
@@ -225,23 +173,23 @@ report: ## Open reports generated by "make test" in a browser
 ### VERSION INCREMENT
 
 .PHONY: bumpmajor
-bumpmajor: ## Increment VERSION file $${major}.0.0 - major bump
+bumpmajor: ## Increment VERSION file ${major}.0.0 - major bump
 	git fetch --tags
 	versionbump --checktags major VERSION
 
 .PHONY: bumpminor
-bumpminor: ## Increment VERSION file 0.$${minor}.0 - minor bump
+bumpminor: ## Increment VERSION file 0.${minor}.0 - minor bump
 	git fetch --tags
 	versionbump --checktags minor VERSION
 
 .PHONY: bumppatch
-bumppatch: ## Increment VERSION file 0.0.$${patch} - patch bump
+bumppatch: ## Increment VERSION file 0.0.${patch} - patch bump
 	git fetch --tags
 	versionbump --checktags patch VERSION
 
 .PHONY: getversion
 getversion:
-	VERSION=$(VERSION) bash -c 'echo $$$$VERSION'
+	VERSION=$(VERSION) bash -c 'echo $$VERSION'
 
 #
 # Helper targets
@@ -275,8 +223,8 @@ $(NAME): dist/$(NAME)_$(GOOS)_$(GOARCH)/$(NAME)
 	install -m 755 $< $@
 
 dist/$(NAME)_$(GOOS)_$(GOARCH)/$(NAME) dist/$(NAME)_$(GOOS)_$(GOARCH)/$(NAME).exe: $(GOFILES) internal/version.go
-	@mkdir -p $$$$(dirname $@)
-	go build -o $@ ./cmd/kick
+	@mkdir -p $$(dirname $@)
+	go build -o $@ ./cmd/$(NAME)
 
 dist/$(NAME)-$(VERSION).$(ARCH).rpm: dist/$(NAME)_$(GOOS)_$(GOARCH)/$(NAME)
 	@mkdir -p $$(dirname $@)
@@ -284,46 +232,32 @@ dist/$(NAME)-$(VERSION).$(ARCH).rpm: dist/$(NAME)_$(GOOS)_$(GOARCH)/$(NAME)
 	nfpm pkg --packager rpm --target dist/
 
 dist/$(NAME)_$(VERSION)_$(GOARCH).deb: dist/$(NAME)_$(GOOS)_$(GOARCH)/$(NAME)
-	@mkdir -p $$$$(dirname $@)
+	@mkdir -p $$(dirname $@)
 	@$(MAKE) nfpm.yaml
 	nfpm pkg --packager deb --target dist/
 
 internal/version.go: internal/version.go.in VERSION
 	@VERSION=$(VERSION) $(DOTENV) envsubst < $< > $@
 
-dist/kick.rb: kick.rb.in dist/kick-$(VERSION).tar.gz
-	@BASEURL="https://github.com/kick-project/kick/archive" VERSION=$(VERSION) SHA256=$$(sha256sum dist/kick-$(VERSION).tar.gz | awk '{print $$$$1}') $(DOTENV) envsubst < $< > $@
+dist/$(NAME)-$(VERSION).rb: dist/$(NAME).rb
+	@cp dist/$(NAME){,-$(VERSION)}.rb
 
-tmp/kick.rb: kick.rb.in dist/kick-$(VERSION).tar.gz
+dist/$(NAME).rb: $(NAME).rb.in dist/$(NAME)-$(VERSION).tar.gz
+	@BASEURL="https://github.com/kick-project/$(NAME)/archive" VERSION=$(VERSION) SHA256=$$(sha256sum dist/$(NAME)-$(VERSION).tar.gz | awk '{print $$1}') $(DOTENV) envsubst < $< > $@
+
+tmp/$(NAME).rb: $(NAME).rb.in dist/$(NAME)-$(VERSION).tar.gz
 	@mkdir -p tmp
-	@BASEURL="file://$(PWD)/dist" VERSION=$(VERSION) SHA256=$$(sha256sum dist/kick-$(VERSION).tar.gz | awk '{print $$$$1}') $(DOTENV) envsubst < $< > $@
+	@BASEURL="file://$(PWD)/dist" VERSION=$(VERSION) SHA256=$$(sha256sum dist/$(NAME)-$(VERSION).tar.gz | awk '{print $$1}') $(DOTENV) envsubst < $< > $@
 
 nfpm.yaml: nfpm.yaml.in VERSION
 	@VERSION=$(VERSION) $(DOTENV) envsubst < $< > $@
 
-dist/kick-$(VERSION).tar.gz: $(GOFILES)
-	tar -zcf dist/kick-$(VERSION).tar.gz $$(find . \( -path ./test -prune -o -path ./tmp \) -prune -false -o \( -name go.mod -o -name go.sum -o -name \*.go \))
-
-go.mod:
-	@$(DOTENV) $(MAKE) _go.mod
-
-_go.mod:
-ifndef GOSERVER
-	@$(MAKE) _go.mod_err
-else ifndef GOGROUP
-	@$(MAKE) _go.mod_err
-endif
-	go mod init $(GOSERVER)/$(GOGROUP)/$(NAME)
-	@$(MAKE) deps
-
-_go.mod_err:
-	@echo 'Please run "go mod init server.com/group/project"'
-	@echo 'Alternatively set "GOSERVER=$$YOURSERVER" and "GOGROUP=$$YOURGROUP" in ~/.env or $(ROOT)/.env file'
-	@exit 1
+dist/$(NAME)-$(VERSION).tar.gz: $(GOFILES)
+	tar -zcf dist/$(NAME)-$(VERSION).tar.gz $$(find . \( -path ./test -prune -o -path ./tmp \) -prune -false -o \( -name go.mod -o -name go.sum -o -name \*.go \))
 
 #
 # make wrapper - Execute any target target prefixed with a underscore.
 # EG 'make vmcreate' will result in the execution of 'make _vmcreate' 
 #
 %:
-	@egrep -q '^_$@:' Makefile && $(DOTENV) $(MAKE) _$@
+	@maker $@
